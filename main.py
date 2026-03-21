@@ -38,6 +38,7 @@ GLUCOSE_MUTATION_STEP = 0.010
 TEMPERATURE_MUTATION_STEP = 1.50
 RANDOM_SEED = 7
 ANIMATION_DELAY_MS = 300
+SURFACE_PLOT_FILE = "surface_plot.png"
 
 GLUCOSE_CENTRE = 0.10
 GLUCOSE_SCALE = 0.08
@@ -400,6 +401,98 @@ def create_prediction_grid(
     return glucose_values, temperature_values, voltage_grid, min(all_values), max(all_values)
 
 
+def plot_surface_3d(
+    model: SurrogateModel,
+    final_population: list[tuple[float, float]],
+    best_solution: tuple[float, float],
+) -> None:
+    """Plot the fitted surrogate model as a 3D surface.
+
+    The surface uses the already-fitted regression model. The final GA
+    population is overlaid as scatter points so the search result can be
+    compared directly with the surrogate landscape.
+    """
+    try:
+        import numpy as np
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+    except ModuleNotFoundError:
+        print(
+            "3D surface plot was skipped because numpy and/or matplotlib are not "
+            "installed in this environment."
+        )
+        return
+
+    # Create a regular grid over the design space using numpy.meshgrid.
+    glucose_values = np.linspace(MIN_GLUCOSE, MAX_GLUCOSE, 60)
+    temperature_values = np.linspace(MIN_TEMPERATURE, MAX_TEMPERATURE, 60)
+    glucose_grid, temperature_grid = np.meshgrid(glucose_values, temperature_values)
+
+    # Use the existing prediction function to calculate the fitted voltage at
+    # each point on the grid.
+    voltage_grid = np.empty_like(glucose_grid)
+    for row_index in range(glucose_grid.shape[0]):
+        for column_index in range(glucose_grid.shape[1]):
+            voltage_grid[row_index, column_index] = predict_voltage(
+                float(glucose_grid[row_index, column_index]),
+                float(temperature_grid[row_index, column_index]),
+                model,
+            )
+
+    figure = plt.figure(figsize=(11, 8))
+    axis = figure.add_subplot(111, projection="3d")
+
+    surface = axis.plot_surface(
+        glucose_grid,
+        temperature_grid,
+        voltage_grid,
+        cmap="viridis",
+        edgecolor="none",
+        alpha=0.88,
+        antialiased=True,
+    )
+
+    population_x = [individual[0] for individual in final_population]
+    population_y = [individual[1] for individual in final_population]
+    population_z = [predict_voltage(individual[0], individual[1], model) for individual in final_population]
+    best_z = predict_voltage(best_solution[0], best_solution[1], model)
+
+    axis.scatter(
+        population_x,
+        population_y,
+        population_z,
+        c="red",
+        s=28,
+        depthshade=True,
+        label="Final GA population",
+    )
+    axis.scatter(
+        [best_solution[0]],
+        [best_solution[1]],
+        [best_z],
+        c="yellow",
+        edgecolors="black",
+        s=120,
+        marker="*",
+        depthshade=False,
+        label="Best solution",
+    )
+
+    axis.set_xlabel("Glucose concentration (mol dm^-3)", labelpad=12)
+    axis.set_ylabel("Temperature (°C)", labelpad=12)
+    axis.set_zlabel("Predicted voltage (V)", labelpad=10)
+    axis.set_title("3D Surface Plot of the Fitted Regression Model", pad=18)
+    axis.view_init(elev=28, azim=-130)
+    axis.legend(loc="upper left")
+
+    colourbar = figure.colorbar(surface, ax=axis, shrink=0.70, pad=0.10)
+    colourbar.set_label("Predicted voltage (V)")
+
+    figure.tight_layout()
+    figure.savefig(SURFACE_PLOT_FILE, dpi=300)
+    plt.show()
+
+
 class GeneticAlgorithmViewer:
     """Tkinter application that animates the GA over the surrogate model."""
 
@@ -632,6 +725,12 @@ class GeneticAlgorithmViewer:
             self.main_canvas_width - 143,
             94,
             text="Background = predicted voltage",
+            font=("Arial", 9),
+        )
+        self.main_canvas.create_text(
+            self.main_canvas_width - 143,
+            112,
+            text="Circles = current GA population",
             font=("Arial", 9),
         )
         self.main_canvas.create_text(
@@ -876,6 +975,8 @@ def main() -> None:
     print(f"Optimal temperature           : {best_solution[1]:.2f} °C")
     print(f"Predicted maximum voltage     : {best_voltage:.4f} V")
     print("=" * 78)
+
+    plot_surface_3d(model, history[-1].population, best_solution)
 
     try:
         viewer = GeneticAlgorithmViewer(model, history)

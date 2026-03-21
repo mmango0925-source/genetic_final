@@ -14,12 +14,15 @@ This repository contains a Python Tkinter program that:
 - **Genetic algorithm kept intact** with selection, crossover, mutation, and elitism.
 - **Tkinter simulation retained** so you can watch the GA move across the fitted search surface.
 - **Clear visual feedback** showing the surrogate heatmap, current population, best solution, and convergence curve.
+- **3D surface plot** of the fitted regression model with the final GA population overlaid.
 - **Comments that explain the modelling idea**: the GA optimises the fitted surrogate, not the raw data points.
 
 ## Requirements
 
 - Python 3.11+
 - Tkinter support in your Python installation
+- numpy
+- matplotlib
 
 ## Run
 
@@ -28,3 +31,4 @@ python3 main.py
 ```
 
 If you run the program in a headless environment without a display server, the optimisation will still execute in the terminal, but the Tkinter window will not open.
+When numpy and matplotlib are available, the script also shows a 3D surface plot and saves it as `surface_plot.png`.
