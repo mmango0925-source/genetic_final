@@ -22,8 +22,8 @@ MAX_GLUCOSE = 0.20
 MIN_TEMPERATURE = 20.0
 MAX_TEMPERATURE = 40.0
 
-POPULATION_SIZE = 40
-GENERATIONS = 60
+POPULATION_SIZE = 4000
+GENERATIONS = 300
 MUTATION_RATE = 0.20
 CROSSOVER_RATE = 0.85
 TOURNAMENT_SIZE = 3
@@ -644,12 +644,15 @@ def main() -> None:
     print(f"Predicted maximum voltage     : {best_voltage:.4f} V")
     print("=" * 68)
 
-    if os.name != "nt" and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
-        print(
-            "Tkinter window not opened because no graphical display is available. "
-            "Run this program on a local desktop environment to view the animation."
-        )
-        return
+    try:
+      viewer = GeneticAlgorithmViewer(model, history)
+      viewer.run()
+    except tk.TclError as error:
+      print(
+        "Tkinter window could not be opened. "
+        "This usually means no graphical display is available "
+        f"or Tk is not configured correctly.\nDetails: {error}"
+    )
 
     viewer = GeneticAlgorithmViewer(model, history)
     viewer.run()
@@ -657,3 +660,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
