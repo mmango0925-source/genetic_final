@@ -735,6 +735,12 @@ class GeneticAlgorithmViewer:
         )
         self.main_canvas.create_text(
             self.main_canvas_width - 143,
+            112,
+            text="Circles = current GA population",
+            font=("Arial", 9),
+        )
+        self.main_canvas.create_text(
+            self.main_canvas_width - 143,
             130,
             text="Star = best individual",
             font=("Arial", 9),
