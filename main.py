@@ -11,6 +11,7 @@ from typing import Callable, NamedTuple
 # -----------------------------------------------------------------------------
 # Workflow:
 #   1. Load the collected experimental dataset.
+#   1. Create an experimental-style dataset.
 #   2. Fit a symbolic regression model to the dataset.
 #   3. Treat that discovered equation as a surrogate model.
 #   4. Use a genetic algorithm (GA) to optimise the surrogate model.
@@ -103,6 +104,7 @@ SYMBOLIC_ELITE_COUNT = 3
 SYMBOLIC_INITIAL_MAX_DEPTH = 5
 SYMBOLIC_MAX_DEPTH = 7
 SYMBOLIC_COMPLEXITY_PENALTY = 0.0001
+SYMBOLIC_COMPLEXITY_PENALTY = 0.0009
 SYMBOLIC_OUTPUT_CLAMP = 2.5
 SYMBOLIC_INVALID_FITNESS = 1_000_000.0
 CONSTANT_MUTATION_STD = 0.40
@@ -177,6 +179,14 @@ def protected_divide(numerator: float, denominator: float, epsilon: float = 1e-6
 
 
 
+def protected_divide(numerator: float, denominator: float, epsilon: float = 1e-6) -> float:
+    """Protected division to keep evolved equations numerically safe."""
+    if abs(denominator) < epsilon:
+        denominator = epsilon if denominator >= 0.0 else -epsilon
+    return numerator / denominator
+
+
+
 def protected_log(value: float, epsilon: float = 1e-6) -> float:
     """Protected logarithm using log(|x| + eps)."""
     return math.log(abs(value) + epsilon)
@@ -194,6 +204,17 @@ def scale_inputs(glucose: float, temperature: float) -> tuple[float, float]:
     g = (glucose - GLUCOSE_CENTRE) / GLUCOSE_SCALE
     t = (temperature - TEMPERATURE_CENTRE) / TEMPERATURE_SCALE
     return g, t
+
+
+
+def clip_numeric(value: float, limit: float = 1_000_000.0) -> float:
+    """Clamp extreme intermediate values so invalid trees do not explode."""
+    if not math.isfinite(value):
+        return float('nan')
+    return max(-limit, min(limit, value))
+
+
+
 
 
 
@@ -260,6 +281,14 @@ def make_variable_node(rng: random.Random) -> ExpressionNode:
     variable_choices = ('glucose', 'temperature', 'g', 't', 'g', 't')
     return ExpressionNode('variable', rng.choice(variable_choices))
 
+def make_constant_node(rng: random.Random) -> ExpressionNode:
+    return ExpressionNode('constant', random_constant(rng))
+
+
+
+def make_variable_node(rng: random.Random) -> ExpressionNode:
+    variable_choices = ('glucose', 'temperature', 'g', 't', 'g', 't')
+    return ExpressionNode('variable', rng.choice(variable_choices))
 
 
 def clone_expression(node: ExpressionNode) -> ExpressionNode:
@@ -270,6 +299,23 @@ def clone_expression(node: ExpressionNode) -> ExpressionNode:
         left=clone_expression(node.left) if node.left is not None else None,
         right=clone_expression(node.right) if node.right is not None else None,
     )
+
+def clone_expression(node: ExpressionNode) -> ExpressionNode:
+    """Deep-copy an expression tree."""
+    return ExpressionNode(
+        node_type=node.node_type,
+        value=node.value,
+        left=clone_expression(node.left) if node.left is not None else None,
+        right=clone_expression(node.right) if node.right is not None else None,
+    )
+
+
+def create_random_terminal(rng: random.Random) -> ExpressionNode:
+    """Create a variable or constant terminal."""
+    if rng.random() < 0.55:
+        return make_variable_node(rng)
+    return make_constant_node(rng)
+
 
 
 
