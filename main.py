@@ -47,14 +47,10 @@ GLUCOSE_SCALE = 0.08
 TEMPERATURE_CENTRE = 30.0
 TEMPERATURE_SCALE = 8.0
 
-DATASET_GLUCOSE_LEVELS = [0.00, 0.02, 0.04, 0.06, 0.08, 0.10, 0.12, 0.14, 0.16, 0.18, 0.20]
-DATASET_TEMPERATURE_LEVELS = [20.0, 22.5, 25.0, 27.5, 30.0, 32.5, 35.0, 37.5, 40.0]
-DATASET_TRIAL_COUNT = 4
-DATASET_NOISE_RANGE = 0.025
-LOCAL_OPTIMUM_GLUCOSE_LEVELS = [0.13, 0.135, 0.14, 0.145, 0.15, 0.155, 0.16, 0.165, 0.17]
-LOCAL_OPTIMUM_TEMPERATURE_LEVELS = [24.0, 24.5, 25.0, 25.5, 26.0]
-LOCAL_OPTIMUM_TRIAL_COUNT = 3
-LOCAL_OPTIMUM_NOISE_RANGE = 0.012
+DATASET_GLUCOSE_LEVELS = [0.03, 0.06, 0.09, 0.12, 0.15, 0.18]
+DATASET_TEMPERATURE_LEVELS = [21.0, 25.0, 27.0, 30.0, 33.0]
+DATASET_TRIAL_COUNT = 2
+DATASET_NOISE_RANGE = 0.018
 
 
 class Observation(NamedTuple):
@@ -106,51 +102,52 @@ class GenerationSnapshot:
 # -----------------------------------------------------------------------------
 
 SYMBOLIC_POPULATION_SIZE = 180
-SYMBOLIC_GENERATIONS = 50
+SYMBOLIC_GENERATIONS = 55
 SYMBOLIC_TOURNAMENT_SIZE = 4
 SYMBOLIC_MUTATION_RATE = 0.25
 SYMBOLIC_CROSSOVER_RATE = 0.80
 SYMBOLIC_ELITE_COUNT = 3
-SYMBOLIC_INITIAL_MAX_DEPTH = 5
-SYMBOLIC_MAX_DEPTH = 7
-SYMBOLIC_COMPLEXITY_PENALTY = 0.00008
+SYMBOLIC_INITIAL_MAX_DEPTH = 4
+SYMBOLIC_MAX_DEPTH = 6
+SYMBOLIC_COMPLEXITY_PENALTY = 0.00012
 SYMBOLIC_VARIABLE_PENALTY = 0.0015
-SYMBOLIC_OUTPUT_CLAMP = 0.95
+SYMBOLIC_OUTPUT_CLAMP = 0.92
 SYMBOLIC_INVALID_FITNESS = 1_000_000.0
 CONSTANT_MUTATION_STD = 0.40
 
 BINARY_OPERATORS = ('+', '-', '*', '/')
-UNARY_OPERATORS = ('sin', 'cos', 'exp', 'log')
+UNARY_OPERATORS = ('exp', 'log')
 
 
 
 def true_biological_response(glucose: float, temperature: float) -> float:
-    """Create a smoother but still clearly non-linear hidden response surface.
+    """Create a smooth non-linear hidden response surface for the project.
 
-    The main optimum is intentionally placed near 25 °C and 0.15 mol dm^-3 with
-    a peak voltage around 0.90 V. A smaller secondary feature, quartic stress
-    penalties, and a light metabolic wobble keep the surface non-linear without
-    making the 3D plot overly chaotic.
+    The surface keeps a clear optimum near 25 °C and 0.15 mol dm^-3 with a
+    maximum close to 0.90 V, but removes the extra ripples that previously made
+    the 3D plot look unnaturally peaky. A small shoulder and quartic stress
+    penalties preserve non-linearity without making the landscape chaotic.
     """
-    main_peak = 0.50 * math.exp(-((glucose - 0.15) / 0.040) ** 2 - ((temperature - 25.0) / 3.4) ** 2)
-    secondary_peak = 0.10 * math.exp(-((glucose - 0.07) / 0.028) ** 2 - ((temperature - 33.5) / 3.0) ** 2)
+    main_peak = 0.49 * math.exp(-((glucose - 0.15) / 0.036) ** 2 - ((temperature - 25.0) / 3.0) ** 2)
+    shoulder_peak = 0.045 * math.exp(-((glucose - 0.09) / 0.050) ** 2 - ((temperature - 30.5) / 4.6) ** 2)
 
-    stress_penalty = 0.08 * ((glucose - 0.15) / 0.09) ** 4 + 0.06 * ((temperature - 25.0) / 7.0) ** 4
-    interaction_penalty = 0.02 * (((glucose - 0.12) * (temperature - 28.0)) / 0.25) ** 2
-    metabolic_wobble = 0.020 * math.sin(24.0 * glucose + 0.32 * temperature)
+    stress_penalty = 0.055 * ((glucose - 0.15) / 0.085) ** 4 + 0.045 * ((temperature - 25.0) / 7.5) ** 4
+    interaction_penalty = 0.010 * (((glucose - 0.145) / 0.055) * ((temperature - 25.0) / 6.0)) ** 2
+    metabolic_wobble = 0.008 * math.sin(16.0 * glucose + 0.16 * temperature - 1.2)
+    metabolic_wobble *= math.exp(-((glucose - 0.13) / 0.11) ** 2 - ((temperature - 27.0) / 9.0) ** 2)
 
-    voltage = 0.42 + main_peak + secondary_peak + metabolic_wobble
+    voltage = 0.41 + main_peak + shoulder_peak + metabolic_wobble
     voltage -= stress_penalty + interaction_penalty
     return max(0.05, voltage)
 
 
 
 def create_sample_dataset() -> list[Observation]:
-    """Create a denser synthetic dataset with repeated noisy trials.
+    """Create a compact synthetic dataset with repeated noisy trials.
 
-    The sampling grid is intentionally denser than before so the learned
-    surrogate has to approximate a richer non-linear response surface rather
-    than a simple smooth hill.
+    The dataset is intentionally limited to 60 total rows so it stays easy to
+    inspect, while the hidden response surface remains non-linear enough to
+    justify the surrogate-model + GA workflow.
     """
     rng = random.Random(RANDOM_SEED)
 
@@ -160,22 +157,6 @@ def create_sample_dataset() -> list[Observation]:
             baseline_voltage = true_biological_response(glucose, temperature)
             for _ in range(DATASET_TRIAL_COUNT):
                 experimental_noise = rng.uniform(-DATASET_NOISE_RANGE, DATASET_NOISE_RANGE)
-                measured_voltage = max(0.05, baseline_voltage + experimental_noise)
-                dataset.append(
-                    Observation(
-                        glucose_concentration=glucose,
-                        temperature=temperature,
-                        voltage=measured_voltage,
-                    )
-                )
-
-    # Add a denser local grid around the biological optimum so the symbolic
-    # surrogate is more strongly constrained near the desired best region.
-    for temperature in LOCAL_OPTIMUM_TEMPERATURE_LEVELS:
-        for glucose in LOCAL_OPTIMUM_GLUCOSE_LEVELS:
-            baseline_voltage = true_biological_response(glucose, temperature)
-            for _ in range(LOCAL_OPTIMUM_TRIAL_COUNT):
-                experimental_noise = rng.uniform(-LOCAL_OPTIMUM_NOISE_RANGE, LOCAL_OPTIMUM_NOISE_RANGE)
                 measured_voltage = max(0.05, baseline_voltage + experimental_noise)
                 dataset.append(
                     Observation(
