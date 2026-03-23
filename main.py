@@ -1,3 +1,4 @@
+import csv
 import math
 import random
 import tkinter as tk
@@ -39,6 +40,7 @@ TEMPERATURE_MUTATION_STEP = 1.50
 RANDOM_SEED = 7
 ANIMATION_DELAY_MS = 300
 SURFACE_PLOT_FILE = "surface_plot.png"
+DATASET_EXPORT_FILE = "model_data_points.csv"
 
 GLUCOSE_CENTRE = 0.10
 GLUCOSE_SCALE = 0.08
@@ -126,11 +128,11 @@ def true_biological_response(glucose: float, temperature: float) -> float:
     """Create a smoother but still clearly non-linear hidden response surface.
 
     The main optimum is intentionally placed near 25 °C and 0.15 mol dm^-3 with
-    a peak voltage around 0.87 V. A smaller secondary feature, quartic stress
+    a peak voltage around 0.90 V. A smaller secondary feature, quartic stress
     penalties, and a light metabolic wobble keep the surface non-linear without
     making the 3D plot overly chaotic.
     """
-    main_peak = 0.47 * math.exp(-((glucose - 0.15) / 0.040) ** 2 - ((temperature - 25.0) / 3.4) ** 2)
+    main_peak = 0.50 * math.exp(-((glucose - 0.15) / 0.040) ** 2 - ((temperature - 25.0) / 3.4) ** 2)
     secondary_peak = 0.10 * math.exp(-((glucose - 0.07) / 0.028) ** 2 - ((temperature - 33.5) / 3.0) ** 2)
 
     stress_penalty = 0.08 * ((glucose - 0.15) / 0.09) ** 4 + 0.06 * ((temperature - 25.0) / 7.0) ** 4
@@ -184,6 +186,22 @@ def create_sample_dataset() -> list[Observation]:
                 )
 
     return dataset
+
+
+def export_dataset_points(dataset: list[Observation], filepath: str = DATASET_EXPORT_FILE) -> None:
+    """Write the exact generated data points used for symbolic regression."""
+    with open(filepath, 'w', newline='', encoding='utf-8') as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(('row_index', 'glucose_concentration', 'temperature', 'voltage'))
+        for row_index, item in enumerate(dataset, start=1):
+            writer.writerow(
+                (
+                    row_index,
+                    f'{item.glucose_concentration:.4f}',
+                    f'{item.temperature:.2f}',
+                    f'{item.voltage:.6f}',
+                )
+            )
 
 
 def protected_divide(numerator: float, denominator: float, epsilon: float = 1e-6) -> float:
@@ -1496,8 +1514,10 @@ def main() -> None:
     random.seed(RANDOM_SEED)
 
     dataset = create_sample_dataset()
+    export_dataset_points(dataset)
     model = fit_symbolic_model(dataset)
     print_model_summary(model, dataset)
+    print(f"Dataset points file     : {DATASET_EXPORT_FILE}")
     plot_predicted_vs_actual(dataset, model)
     plot_symbolic_history(model)
 
