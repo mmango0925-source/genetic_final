@@ -48,7 +48,7 @@ TEMPERATURE_SCALE = 8.0
 DATASET_GLUCOSE_LEVELS = [0.00, 0.02, 0.04, 0.06, 0.08, 0.10, 0.12, 0.14, 0.16, 0.18, 0.20]
 DATASET_TEMPERATURE_LEVELS = [20.0, 22.5, 25.0, 27.5, 30.0, 32.5, 35.0, 37.5, 40.0]
 DATASET_TRIAL_COUNT = 4
-DATASET_NOISE_RANGE = 0.035
+DATASET_NOISE_RANGE = 0.025
 
 
 class Observation(NamedTuple):
@@ -109,7 +109,7 @@ SYMBOLIC_INITIAL_MAX_DEPTH = 5
 SYMBOLIC_MAX_DEPTH = 7
 SYMBOLIC_COMPLEXITY_PENALTY = 0.00008
 SYMBOLIC_VARIABLE_PENALTY = 0.0015
-SYMBOLIC_OUTPUT_CLAMP = 1.40
+SYMBOLIC_OUTPUT_CLAMP = 1.05
 SYMBOLIC_INVALID_FITNESS = 1_000_000.0
 CONSTANT_MUTATION_STD = 0.40
 
@@ -119,23 +119,21 @@ UNARY_OPERATORS = ('sin', 'cos', 'exp', 'log')
 
 
 def true_biological_response(glucose: float, temperature: float) -> float:
-    """Create a deliberately complex hidden biological response surface.
+    """Create a smoother but still clearly non-linear hidden response surface.
 
-    The response is designed to be clearly non-linear and slightly irregular so
-    a symbolic surrogate and GA-based optimisation are justified in the project.
-    It contains a main optimum, a stronger secondary peak, a sharp quartic
-    stress penalty, and a stronger metabolic wobble term.
+    The main optimum is intentionally placed near 25 °C and 0.15 mol dm^-3 with
+    a peak voltage around 0.87 V. A smaller secondary feature, quartic stress
+    penalties, and a light metabolic wobble keep the surface non-linear without
+    making the 3D plot overly chaotic.
     """
-    main_peak = 0.98 * math.exp(-((glucose - 0.11) / 0.030) ** 2 - ((temperature - 31.5) / 3.6) ** 2)
-    secondary_peak = 0.34 * math.exp(-((glucose - 0.17) / 0.018) ** 2 - ((temperature - 26.5) / 2.5) ** 2)
-    tertiary_shoulder = 0.16 * math.exp(-((glucose - 0.055) / 0.020) ** 2 - ((temperature - 36.0) / 2.8) ** 2)
+    main_peak = 0.47 * math.exp(-((glucose - 0.15) / 0.040) ** 2 - ((temperature - 25.0) / 3.4) ** 2)
+    secondary_peak = 0.10 * math.exp(-((glucose - 0.07) / 0.028) ** 2 - ((temperature - 33.5) / 3.0) ** 2)
 
-    stress_penalty = 0.24 * ((glucose - 0.11) / 0.082) ** 4 + 0.20 * ((temperature - 31.0) / 6.0) ** 4
-    interaction_penalty = 0.10 * (((glucose - 0.14) * (temperature - 30.0)) / 0.22) ** 2
-    metabolic_wobble = 0.065 * math.sin(34.0 * glucose + 0.58 * temperature)
-    metabolic_wobble += 0.028 * math.sin(18.0 * glucose - 0.22 * temperature)
+    stress_penalty = 0.08 * ((glucose - 0.15) / 0.09) ** 4 + 0.06 * ((temperature - 25.0) / 7.0) ** 4
+    interaction_penalty = 0.02 * (((glucose - 0.12) * (temperature - 28.0)) / 0.25) ** 2
+    metabolic_wobble = 0.020 * math.sin(24.0 * glucose + 0.32 * temperature)
 
-    voltage = 0.23 + main_peak + secondary_peak + tertiary_shoulder + metabolic_wobble
+    voltage = 0.42 + main_peak + secondary_peak + metabolic_wobble
     voltage -= stress_penalty + interaction_penalty
     return max(0.05, voltage)
 
