@@ -49,6 +49,10 @@ DATASET_GLUCOSE_LEVELS = [0.00, 0.02, 0.04, 0.06, 0.08, 0.10, 0.12, 0.14, 0.16, 
 DATASET_TEMPERATURE_LEVELS = [20.0, 22.5, 25.0, 27.5, 30.0, 32.5, 35.0, 37.5, 40.0]
 DATASET_TRIAL_COUNT = 4
 DATASET_NOISE_RANGE = 0.025
+LOCAL_OPTIMUM_GLUCOSE_LEVELS = [0.13, 0.135, 0.14, 0.145, 0.15, 0.155, 0.16, 0.165, 0.17]
+LOCAL_OPTIMUM_TEMPERATURE_LEVELS = [24.0, 24.5, 25.0, 25.5, 26.0]
+LOCAL_OPTIMUM_TRIAL_COUNT = 3
+LOCAL_OPTIMUM_NOISE_RANGE = 0.012
 
 
 class Observation(NamedTuple):
@@ -109,7 +113,7 @@ SYMBOLIC_INITIAL_MAX_DEPTH = 5
 SYMBOLIC_MAX_DEPTH = 7
 SYMBOLIC_COMPLEXITY_PENALTY = 0.00008
 SYMBOLIC_VARIABLE_PENALTY = 0.0015
-SYMBOLIC_OUTPUT_CLAMP = 1.05
+SYMBOLIC_OUTPUT_CLAMP = 0.95
 SYMBOLIC_INVALID_FITNESS = 1_000_000.0
 CONSTANT_MUTATION_STD = 0.40
 
@@ -154,6 +158,22 @@ def create_sample_dataset() -> list[Observation]:
             baseline_voltage = true_biological_response(glucose, temperature)
             for _ in range(DATASET_TRIAL_COUNT):
                 experimental_noise = rng.uniform(-DATASET_NOISE_RANGE, DATASET_NOISE_RANGE)
+                measured_voltage = max(0.05, baseline_voltage + experimental_noise)
+                dataset.append(
+                    Observation(
+                        glucose_concentration=glucose,
+                        temperature=temperature,
+                        voltage=measured_voltage,
+                    )
+                )
+
+    # Add a denser local grid around the biological optimum so the symbolic
+    # surrogate is more strongly constrained near the desired best region.
+    for temperature in LOCAL_OPTIMUM_TEMPERATURE_LEVELS:
+        for glucose in LOCAL_OPTIMUM_GLUCOSE_LEVELS:
+            baseline_voltage = true_biological_response(glucose, temperature)
+            for _ in range(LOCAL_OPTIMUM_TRIAL_COUNT):
+                experimental_noise = rng.uniform(-LOCAL_OPTIMUM_NOISE_RANGE, LOCAL_OPTIMUM_NOISE_RANGE)
                 measured_voltage = max(0.05, baseline_voltage + experimental_noise)
                 dataset.append(
                     Observation(
