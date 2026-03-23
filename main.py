@@ -11,6 +11,7 @@ from typing import Callable, NamedTuple
 # -----------------------------------------------------------------------------
 # Workflow:
 #   1. Load the collected experimental dataset.
+#   1. Create an experimental-style dataset.
 #   2. Fit a symbolic regression model to the dataset.
 #   3. Treat that discovered equation as a surrogate model.
 #   4. Use a genetic algorithm (GA) to optimise the surrogate model.
@@ -64,6 +65,8 @@ class ExpressionNode:
     right: 'ExpressionNode | None' = None
 
 
+
+
 @dataclass(frozen=True)
 class SurrogateModel:
     """Stores the best symbolic-regression expression and its fit statistics."""
@@ -104,6 +107,8 @@ SYMBOLIC_INITIAL_MAX_DEPTH = 5
 SYMBOLIC_MAX_DEPTH = 7
 SYMBOLIC_COMPLEXITY_PENALTY = 0.00008
 SYMBOLIC_VARIABLE_PENALTY = 0.0015
+SYMBOLIC_COMPLEXITY_PENALTY = 0.0001
+SYMBOLIC_COMPLEXITY_PENALTY = 0.0009
 SYMBOLIC_OUTPUT_CLAMP = 2.5
 SYMBOLIC_INVALID_FITNESS = 1_000_000.0
 CONSTANT_MUTATION_STD = 0.40
@@ -187,6 +192,55 @@ def create_sample_dataset() -> list[Observation]:
     temperature_values = sorted({observation.temperature for observation in measured_dataset})
     glucose_values = sorted({observation.glucose_concentration for observation in measured_dataset})
     augmented_dataset = list(measured_dataset)
+    """Create a dataset directly from the collected experimental readings."""
+    collected_rows = [
+        (20.0, 0.20, 0.83),
+        (20.0, 0.15, 0.74),
+        (20.0, 0.10, 0.73),
+        (20.0, 0.05, 0.74),
+        (20.0, 0.00, 0.68),
+        (25.0, 0.20, 0.81),
+        (25.0, 0.15, 0.87),
+        (25.0, 0.10, 0.80),
+        (25.0, 0.05, 0.77),
+        (25.0, 0.00, 0.62),
+        (30.0, 0.20, 0.78),
+        (30.0, 0.15, 0.74),
+        (30.0, 0.10, 0.77),
+        (30.0, 0.05, 0.76),
+        (30.0, 0.00, 0.74),
+        (30.0, 0.20, 0.77),
+        (30.0, 0.15, 0.75),
+        (30.0, 0.10, 0.75),
+        (30.0, 0.05, 0.76),
+        (30.0, 0.00, 0.73),
+        (35.0, 0.20, 0.85),
+        (35.0, 0.15, 0.82),
+        (35.0, 0.10, 0.75),
+        (35.0, 0.05, 0.71),
+        (35.0, 0.00, 0.70),
+        (40.0, 0.20, 0.73),
+        (40.0, 0.15, 0.70),
+        (40.0, 0.10, 0.66),
+        (40.0, 0.05, 0.66),
+        (40.0, 0.00, 0.62),
+    ]
+    return [
+        Observation(
+            glucose_concentration=glucose,
+            temperature=temperature,
+            voltage=voltage,
+        )
+        for temperature, glucose, voltage in collected_rows
+    ]
+
+
+
+def protected_divide(numerator: float, denominator: float, epsilon: float = 1e-6) -> float:
+    """Protected division to keep evolved equations numerically safe."""
+    if abs(denominator) < epsilon:
+        denominator = epsilon if denominator >= 0.0 else -epsilon
+    return numerator / denominator
 
     for temperature in temperature_values:
         for glucose_left, glucose_right in zip(glucose_values, glucose_values[1:]):
@@ -216,6 +270,7 @@ def create_sample_dataset() -> list[Observation]:
 
 
 
+
 def protected_divide(numerator: float, denominator: float, epsilon: float = 1e-6) -> float:
     """Protected division to keep evolved equations numerically safe."""
     if abs(denominator) < epsilon:
@@ -241,6 +296,28 @@ def scale_inputs(glucose: float, temperature: float) -> tuple[float, float]:
     g = (glucose - GLUCOSE_CENTRE) / GLUCOSE_SCALE
     t = (temperature - TEMPERATURE_CENTRE) / TEMPERATURE_SCALE
     return g, t
+
+
+
+def clip_numeric(value: float, limit: float = 1_000_000.0) -> float:
+    """Clamp extreme intermediate values so invalid trees do not explode."""
+    if not math.isfinite(value):
+        return float('nan')
+    return max(-limit, min(limit, value))
+
+
+
+
+
+
+def clip_numeric(value: float, limit: float = 1_000_000.0) -> float:
+    """Clamp extreme intermediate values so invalid trees do not explode."""
+    if not math.isfinite(value):
+        return float('nan')
+    return max(-limit, min(limit, value))
+
+
+
 
 
 
@@ -307,6 +384,8 @@ def make_variable_node(rng: random.Random) -> ExpressionNode:
     variable_choices = ('glucose', 'temperature', 'g', 't', 'g', 't')
     return ExpressionNode('variable', rng.choice(variable_choices))
 
+def make_constant_node(rng: random.Random) -> ExpressionNode:
+    return ExpressionNode('constant', random_constant(rng))
 
 
 def clone_expression(node: ExpressionNode) -> ExpressionNode:
@@ -317,6 +396,47 @@ def clone_expression(node: ExpressionNode) -> ExpressionNode:
         left=clone_expression(node.left) if node.left is not None else None,
         right=clone_expression(node.right) if node.right is not None else None,
     )
+
+
+
+def create_random_terminal(rng: random.Random) -> ExpressionNode:
+    """Create a variable or constant terminal."""
+    if rng.random() < 0.55:
+        return make_variable_node(rng)
+    return make_constant_node(rng)
+
+
+
+def make_variable_node(rng: random.Random) -> ExpressionNode:
+    variable_choices = ('glucose', 'temperature', 'g', 't', 'g', 't')
+    return ExpressionNode('variable', rng.choice(variable_choices))
+
+
+def clone_expression(node: ExpressionNode) -> ExpressionNode:
+    """Deep-copy an expression tree."""
+    return ExpressionNode(
+        node_type=node.node_type,
+        value=node.value,
+        left=clone_expression(node.left) if node.left is not None else None,
+        right=clone_expression(node.right) if node.right is not None else None,
+    )
+
+def clone_expression(node: ExpressionNode) -> ExpressionNode:
+    """Deep-copy an expression tree."""
+    return ExpressionNode(
+        node_type=node.node_type,
+        value=node.value,
+        left=clone_expression(node.left) if node.left is not None else None,
+        right=clone_expression(node.right) if node.right is not None else None,
+    )
+
+
+def create_random_terminal(rng: random.Random) -> ExpressionNode:
+    """Create a variable or constant terminal."""
+    if rng.random() < 0.55:
+        return make_variable_node(rng)
+    return make_constant_node(rng)
+
 
 
 
@@ -603,6 +723,7 @@ def evaluate_symbolic_candidate(expression: ExpressionNode, dataset: list[Observ
     used_variables = variables_used(expression)
     missing_variable_count = 2 - len(used_variables)
     fitness = mse + SYMBOLIC_COMPLEXITY_PENALTY * complexity + SYMBOLIC_VARIABLE_PENALTY * missing_variable_count
+    fitness = mse + SYMBOLIC_COMPLEXITY_PENALTY * complexity
     return fitness, mse, r_squared, rmse, output_scale, output_bias
 
 
