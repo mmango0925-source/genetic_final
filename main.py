@@ -3,16 +3,16 @@ import random
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import ttk
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 
 # =============================================================================
 # Microbial fuel cell optimisation project
 # -----------------------------------------------------------------------------
 # Workflow:
-#   1. Create an experimental-style dataset.
-#   2. Fit a polynomial regression model to the dataset.
-#   3. Treat that regression equation as a surrogate model.
+#   1. Load the collected experimental dataset.
+#   2. Fit a symbolic regression model to the dataset.
+#   3. Treat that discovered equation as a surrogate model.
 #   4. Use a genetic algorithm (GA) to optimise the surrogate model.
 #   5. Animate the GA in Tkinter so the search can be watched generation by
 #      generation.
@@ -54,13 +54,29 @@ class Observation(NamedTuple):
     voltage: float
 
 
-class SurrogateModel(NamedTuple):
-    """Stores the fitted polynomial model and simple fit statistics."""
+@dataclass(frozen=True)
+class ExpressionNode:
+    """One node in a symbolic expression tree used by genetic programming."""
 
-    coefficients: list[float]
-    feature_names: list[str]
+    node_type: str
+    value: str | float
+    left: 'ExpressionNode | None' = None
+    right: 'ExpressionNode | None' = None
+
+
+@dataclass(frozen=True)
+class SurrogateModel:
+    """Stores the best symbolic-regression expression and its fit statistics."""
+
+    expression_tree: ExpressionNode
+    best_expression: str
+    output_scale: float
+    output_bias: float
+    best_fitness: float
     r_squared: float
     rmse: float
+    complexity: int
+    history: tuple[float, ...]
 
 
 @dataclass(frozen=True)
@@ -75,12 +91,64 @@ class GenerationSnapshot:
 
 
 # -----------------------------------------------------------------------------
-# 1. Dataset and surrogate model.
+# 1. Dataset and symbolic surrogate model.
 # -----------------------------------------------------------------------------
+
+SYMBOLIC_POPULATION_SIZE = 180
+SYMBOLIC_GENERATIONS = 50
+SYMBOLIC_TOURNAMENT_SIZE = 4
+SYMBOLIC_MUTATION_RATE = 0.25
+SYMBOLIC_CROSSOVER_RATE = 0.80
+SYMBOLIC_ELITE_COUNT = 3
+SYMBOLIC_INITIAL_MAX_DEPTH = 5
+SYMBOLIC_MAX_DEPTH = 7
+SYMBOLIC_COMPLEXITY_PENALTY = 0.00008
+SYMBOLIC_VARIABLE_PENALTY = 0.0015
+SYMBOLIC_OUTPUT_CLAMP = 2.5
+SYMBOLIC_INVALID_FITNESS = 1_000_000.0
+CONSTANT_MUTATION_STD = 0.40
+
+BINARY_OPERATORS = ('+', '-', '*', '/')
+UNARY_OPERATORS = ('sin', 'cos', 'exp', 'log')
+
+
+
+COLLECTED_ROWS = [
+    (20.0, 0.20, 0.83),
+    (20.0, 0.15, 0.74),
+    (20.0, 0.10, 0.73),
+    (20.0, 0.05, 0.74),
+    (20.0, 0.00, 0.68),
+    (25.0, 0.20, 0.81),
+    (25.0, 0.15, 0.87),
+    (25.0, 0.10, 0.80),
+    (25.0, 0.05, 0.77),
+    (25.0, 0.00, 0.62),
+    (30.0, 0.20, 0.78),
+    (30.0, 0.15, 0.74),
+    (30.0, 0.10, 0.77),
+    (30.0, 0.05, 0.76),
+    (30.0, 0.00, 0.74),
+    (30.0, 0.20, 0.77),
+    (30.0, 0.15, 0.75),
+    (30.0, 0.10, 0.75),
+    (30.0, 0.05, 0.76),
+    (30.0, 0.00, 0.73),
+    (35.0, 0.20, 0.85),
+    (35.0, 0.15, 0.82),
+    (35.0, 0.10, 0.75),
+    (35.0, 0.05, 0.71),
+    (35.0, 0.00, 0.70),
+    (40.0, 0.20, 0.73),
+    (40.0, 0.15, 0.70),
+    (40.0, 0.10, 0.66),
+    (40.0, 0.05, 0.66),
+    (40.0, 0.00, 0.62),
+]
 
 
 def true_biological_response(glucose: float, temperature: float) -> float:
-    """Create a realistic hidden response used only to generate sample data."""
+    """Legacy synthetic response kept for reference from the earlier version."""
     main_peak = 0.95 * math.exp(-((glucose - 0.11) / 0.045) ** 2 - ((temperature - 31.5) / 4.8) ** 2)
     secondary_peak = 0.16 * math.exp(-((glucose - 0.17) / 0.022) ** 2 - ((temperature - 27.0) / 3.8) ** 2)
     stress_penalty = 0.16 * ((glucose - 0.11) / 0.09) ** 4 + 0.14 * ((temperature - 31.0) / 7.5) ** 4
@@ -91,146 +159,666 @@ def true_biological_response(glucose: float, temperature: float) -> float:
 
 
 
-def create_sample_dataset() -> list[Observation]:
-    """Create a larger dataset with repeated trials and experimental noise."""
-    glucose_levels = [0.02, 0.04, 0.06, 0.08, 0.10, 0.12, 0.14, 0.16, 0.18]
-    temperature_levels = [22.0, 25.0, 28.0, 31.0, 34.0, 37.0, 40.0]
-    trial_count = 3
-    rng = random.Random(RANDOM_SEED)
-
-    dataset: list[Observation] = []
-    for glucose in glucose_levels:
-        for temperature in temperature_levels:
-            baseline_voltage = true_biological_response(glucose, temperature)
-            for _ in range(trial_count):
-                experimental_noise = rng.uniform(-0.028, 0.028)
-                measured_voltage = max(0.05, baseline_voltage + experimental_noise)
-                dataset.append(Observation(glucose, temperature, measured_voltage))
-
-    return dataset
-
-
-
-def build_feature_row(glucose: float, temperature: float) -> list[float]:
-    """Create one regression feature row for the surrogate model.
-
-    The inputs are centred and scaled first so the least-squares calculation is
-    more stable. The resulting surrogate is still a cubic polynomial with the
-    higher-order and interaction terms requested in the task.
-    """
-    g = (glucose - GLUCOSE_CENTRE) / GLUCOSE_SCALE
-    t = (temperature - TEMPERATURE_CENTRE) / TEMPERATURE_SCALE
-
+def build_measured_dataset() -> list[Observation]:
+    """Convert the collected measurement table into Observation rows."""
     return [
-        1.0,
-        g,
-        t,
-        g * g,
-        t * t,
-        g * t,
-        g ** 3,
-        t ** 3,
-        (g ** 2) * t,
-        g * (t ** 2),
+        Observation(
+            glucose_concentration=glucose,
+            temperature=temperature,
+            voltage=voltage,
+        )
+        for temperature, glucose, voltage in COLLECTED_ROWS
     ]
 
 
 
-def solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list[float]:
-    """Solve Ax = b using Gaussian elimination with partial pivoting."""
-    size = len(vector)
-    augmented = [row[:] + [value] for row, value in zip(matrix, vector)]
+def create_sample_dataset() -> list[Observation]:
+    """Create a dataset from the collected readings plus smooth interpolated points.
 
-    for pivot_index in range(size):
-        pivot_row = max(range(pivot_index, size), key=lambda row: abs(augmented[row][pivot_index]))
-        augmented[pivot_index], augmented[pivot_row] = augmented[pivot_row], augmented[pivot_index]
-        pivot_value = augmented[pivot_index][pivot_index]
-        if abs(pivot_value) < 1e-12:
-            raise ValueError("The regression system is singular and cannot be solved.")
+    The collected table is kept intact, and additional interpolated grid observations are
+    generated from neighbouring measured values. This gives the symbolic
+    regression a much denser and smoother 2D surface to learn from so the
+    fitted curve/response surface looks more natural.
+    """
+    measured_dataset = build_measured_dataset()
 
-        for column in range(pivot_index, size + 1):
-            augmented[pivot_index][column] /= pivot_value
+    mean_lookup: dict[tuple[float, float], float] = {}
+    grouped_values: dict[tuple[float, float], list[float]] = {}
+    for observation in measured_dataset:
+        key = (observation.temperature, observation.glucose_concentration)
+        grouped_values.setdefault(key, []).append(observation.voltage)
 
-        for row in range(size):
-            if row == pivot_index:
-                continue
-            factor = augmented[row][pivot_index]
-            for column in range(pivot_index, size + 1):
-                augmented[row][column] -= factor * augmented[pivot_index][column]
+    for key, values in grouped_values.items():
+        mean_lookup[key] = sum(values) / len(values)
 
-    return [augmented[row][-1] for row in range(size)]
+    temperature_values = sorted({observation.temperature for observation in measured_dataset})
+    glucose_values = sorted({observation.glucose_concentration for observation in measured_dataset})
+    augmented_lookup: dict[tuple[float, float], float] = {}
+    interpolation_fractions = (0.25, 0.50, 0.75)
+
+    for temperature in temperature_values:
+        for glucose_left, glucose_right in zip(glucose_values, glucose_values[1:]):
+            left_voltage = mean_lookup[(temperature, glucose_left)]
+            right_voltage = mean_lookup[(temperature, glucose_right)]
+            for fraction in interpolation_fractions:
+                interpolated_glucose = glucose_left + (glucose_right - glucose_left) * fraction
+                interpolated_voltage = left_voltage + (right_voltage - left_voltage) * fraction
+                augmented_lookup[(round(temperature, 4), round(interpolated_glucose, 4))] = interpolated_voltage
+
+    for glucose in glucose_values:
+        for temperature_low, temperature_high in zip(temperature_values, temperature_values[1:]):
+            low_voltage = mean_lookup[(temperature_low, glucose)]
+            high_voltage = mean_lookup[(temperature_high, glucose)]
+            for fraction in interpolation_fractions:
+                interpolated_temperature = temperature_low + (temperature_high - temperature_low) * fraction
+                interpolated_voltage = low_voltage + (high_voltage - low_voltage) * fraction
+                augmented_lookup[(round(interpolated_temperature, 4), round(glucose, 4))] = interpolated_voltage
+
+    for temperature_low, temperature_high in zip(temperature_values, temperature_values[1:]):
+        for glucose_left, glucose_right in zip(glucose_values, glucose_values[1:]):
+            top_left = mean_lookup[(temperature_low, glucose_left)]
+            top_right = mean_lookup[(temperature_low, glucose_right)]
+            bottom_left = mean_lookup[(temperature_high, glucose_left)]
+            bottom_right = mean_lookup[(temperature_high, glucose_right)]
+            centre_temperature = (temperature_low + temperature_high) / 2.0
+            centre_glucose = (glucose_left + glucose_right) / 2.0
+            cell_average = (top_left + top_right + bottom_left + bottom_right) / 4.0
+            augmented_lookup[(round(centre_temperature, 4), round(centre_glucose, 4))] = cell_average
+
+    augmented_dataset = list(measured_dataset)
+    original_keys = set(grouped_values)
+    for (temperature, glucose), voltage in sorted(augmented_lookup.items()):
+        if (temperature, glucose) in original_keys:
+            continue
+        augmented_dataset.append(
+            Observation(
+                glucose_concentration=glucose,
+                temperature=temperature,
+                voltage=voltage,
+            )
+        )
+
+    return augmented_dataset
 
 
 
-def fit_surrogate_model(dataset: list[Observation]) -> SurrogateModel:
-    """Fit the polynomial surrogate model using least squares normal equations."""
-    rows = [build_feature_row(item.glucose_concentration, item.temperature) for item in dataset]
-    targets = [item.voltage for item in dataset]
-    feature_count = len(rows[0])
+def protected_divide(numerator: float, denominator: float, epsilon: float = 1e-6) -> float:
+    """Protected division to keep evolved equations numerically safe."""
+    if abs(denominator) < epsilon:
+        denominator = epsilon if denominator >= 0.0 else -epsilon
+    return numerator / denominator
 
-    xtx = [[0.0 for _ in range(feature_count)] for _ in range(feature_count)]
-    xty = [0.0 for _ in range(feature_count)]
 
-    for row, target in zip(rows, targets):
-        for left in range(feature_count):
-            xty[left] += row[left] * target
-            for right in range(feature_count):
-                xtx[left][right] += row[left] * row[right]
 
-    coefficients = solve_linear_system(xtx, xty)
-    predictions = [sum(value * coefficient for value, coefficient in zip(row, coefficients)) for row in rows]
+def protected_log(value: float, epsilon: float = 1e-6) -> float:
+    """Protected logarithm using log(|x| + eps)."""
+    return math.log(abs(value) + epsilon)
 
-    mean_voltage = sum(targets) / len(targets)
+
+
+def protected_exp(value: float) -> float:
+    """Protected exponential with clipping so the GP stays CPU-friendly."""
+    return math.exp(max(-12.0, min(12.0, value)))
+
+
+
+def scale_inputs(glucose: float, temperature: float) -> tuple[float, float]:
+    """Create centred/scaled aliases used by the symbolic GP for stability."""
+    g = (glucose - GLUCOSE_CENTRE) / GLUCOSE_SCALE
+    t = (temperature - TEMPERATURE_CENTRE) / TEMPERATURE_SCALE
+    return g, t
+
+
+
+def clip_numeric(value: float, limit: float = 1_000_000.0) -> float:
+    """Clamp extreme intermediate values so invalid trees do not explode."""
+    if not math.isfinite(value):
+        return float('nan')
+    return max(-limit, min(limit, value))
+
+
+
+def clamp_prediction(value: float) -> float:
+    """Clamp final predictions to a physically reasonable range."""
+    if not math.isfinite(value):
+        return float('nan')
+    return max(-0.20, min(SYMBOLIC_OUTPUT_CLAMP, value))
+
+
+
+def random_constant(rng: random.Random) -> float:
+    """Create an ephemeral random constant for a new expression tree."""
+    reusable_constants = [
+        -2.0,
+        -1.0,
+        -0.5,
+        -0.25,
+        0.0,
+        0.02,
+        0.05,
+        0.10,
+        0.12,
+        0.16,
+        0.20,
+        0.25,
+        0.5,
+        1.0,
+        2.0,
+        5.0,
+        8.0,
+        22.0,
+        25.0,
+        30.0,
+        31.0,
+        34.0,
+        37.0,
+        40.0,
+    ]
+    if rng.random() < 0.55:
+        return float(rng.choice(reusable_constants))
+    if rng.random() < 0.50:
+        return round(rng.uniform(-2.0, 2.0), 4)
+    if rng.random() < 0.50:
+        return round(rng.uniform(MIN_GLUCOSE, MAX_GLUCOSE), 4)
+    return round(rng.uniform(MIN_TEMPERATURE, MAX_TEMPERATURE), 4)
+
+
+
+def make_constant_node(rng: random.Random) -> ExpressionNode:
+    return ExpressionNode('constant', random_constant(rng))
+
+
+
+def make_variable_node(rng: random.Random) -> ExpressionNode:
+    variable_choices = ('glucose', 'temperature', 'g', 't', 'g', 't')
+    return ExpressionNode('variable', rng.choice(variable_choices))
+
+
+
+def clone_expression(node: ExpressionNode) -> ExpressionNode:
+    """Deep-copy an expression tree."""
+    return ExpressionNode(
+        node_type=node.node_type,
+        value=node.value,
+        left=clone_expression(node.left) if node.left is not None else None,
+        right=clone_expression(node.right) if node.right is not None else None,
+    )
+
+
+
+def create_random_terminal(rng: random.Random) -> ExpressionNode:
+    """Create a variable or constant terminal."""
+    if rng.random() < 0.55:
+        return make_variable_node(rng)
+    return make_constant_node(rng)
+
+
+
+def create_random_expression(
+    rng: random.Random,
+    max_depth: int,
+    current_depth: int = 0,
+    force_function: bool = False,
+) -> ExpressionNode:
+    """Create a random expression tree using a standard GP grow strategy."""
+    at_max_depth = current_depth >= max_depth
+    choose_terminal = at_max_depth or (not force_function and current_depth > 0 and rng.random() < 0.28)
+    if choose_terminal:
+        return create_random_terminal(rng)
+
+    if rng.random() < 0.35:
+        operator = rng.choice(UNARY_OPERATORS)
+        child = create_random_expression(rng, max_depth, current_depth + 1)
+        return ExpressionNode('unary', operator, left=child)
+
+    operator = rng.choice(BINARY_OPERATORS)
+    left = create_random_expression(rng, max_depth, current_depth + 1)
+    right = create_random_expression(rng, max_depth, current_depth + 1)
+    return ExpressionNode('binary', operator, left=left, right=right)
+
+
+
+def expression_depth(node: ExpressionNode) -> int:
+    """Return the maximum tree depth."""
+    if node.node_type in {'constant', 'variable'}:
+        return 1
+    if node.node_type == 'unary' and node.left is not None:
+        return 1 + expression_depth(node.left)
+    if node.left is not None and node.right is not None:
+        return 1 + max(expression_depth(node.left), expression_depth(node.right))
+    return 1
+
+
+
+def expression_complexity(node: ExpressionNode) -> int:
+    """Count nodes as a simple equation-complexity measure."""
+    if node.node_type in {'constant', 'variable'}:
+        return 1
+    if node.node_type == 'unary' and node.left is not None:
+        return 1 + expression_complexity(node.left)
+    if node.left is not None and node.right is not None:
+        return 1 + expression_complexity(node.left) + expression_complexity(node.right)
+    return 1
+
+
+
+def expression_to_string(node: ExpressionNode) -> str:
+    """Convert an expression tree to a readable infix string."""
+    if node.node_type == 'constant':
+        return f'{float(node.value):.4f}'.rstrip('0').rstrip('.')
+    if node.node_type == 'variable':
+        return str(node.value)
+    if node.node_type == 'unary' and node.left is not None:
+        child = expression_to_string(node.left)
+        if node.value == 'log':
+            return f'protected_log({child})'
+        return f'{node.value}({child})'
+    if node.left is not None and node.right is not None:
+        left = expression_to_string(node.left)
+        right = expression_to_string(node.right)
+        if node.value == '/':
+            return f'protected_div({left}, {right})'
+        return f'({left} {node.value} {right})'
+    return '0.0'
+
+
+
+def evaluate_expression(node: ExpressionNode, glucose: float, temperature: float) -> float:
+    """Safely evaluate one expression for one input row."""
+    try:
+        if node.node_type == 'constant':
+            return float(node.value)
+        if node.node_type == 'variable':
+            g, t = scale_inputs(glucose, temperature)
+            if node.value == 'glucose':
+                return glucose
+            if node.value == 'temperature':
+                return temperature
+            if node.value == 'g':
+                return g
+            return t
+        if node.node_type == 'unary' and node.left is not None:
+            child_value = evaluate_expression(node.left, glucose, temperature)
+            if not math.isfinite(child_value):
+                return float('nan')
+            if node.value == 'sin':
+                return clip_numeric(math.sin(child_value))
+            if node.value == 'cos':
+                return clip_numeric(math.cos(child_value))
+            if node.value == 'exp':
+                return clip_numeric(protected_exp(child_value))
+            if node.value == 'log':
+                return clip_numeric(protected_log(child_value))
+        if node.left is not None and node.right is not None:
+            left_value = evaluate_expression(node.left, glucose, temperature)
+            right_value = evaluate_expression(node.right, glucose, temperature)
+            if not math.isfinite(left_value) or not math.isfinite(right_value):
+                return float('nan')
+            if node.value == '+':
+                return clip_numeric(left_value + right_value)
+            if node.value == '-':
+                return clip_numeric(left_value - right_value)
+            if node.value == '*':
+                return clip_numeric(left_value * right_value)
+            if node.value == '/':
+                return clip_numeric(protected_divide(left_value, right_value))
+    except (OverflowError, ValueError):
+        return float('nan')
+    return float('nan')
+
+
+
+def all_subtree_paths(node: ExpressionNode, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+    """Return all subtree paths in the tree so crossover/mutation can target them."""
+    paths = [prefix]
+    if node.left is not None:
+        paths.extend(all_subtree_paths(node.left, prefix + ('left',)))
+    if node.right is not None:
+        paths.extend(all_subtree_paths(node.right, prefix + ('right',)))
+    return paths
+
+
+
+def get_subtree(node: ExpressionNode, path: tuple[str, ...]) -> ExpressionNode:
+    """Read a subtree by path."""
+    current = node
+    for step in path:
+        current = current.left if step == 'left' else current.right
+        if current is None:
+            raise ValueError('Invalid subtree path.')
+    return current
+
+
+
+def replace_subtree(node: ExpressionNode, path: tuple[str, ...], new_subtree: ExpressionNode) -> ExpressionNode:
+    """Return a new tree with one subtree replaced."""
+    if not path:
+        return clone_expression(new_subtree)
+
+    step = path[0]
+    remaining = path[1:]
+    if step == 'left' and node.left is not None:
+        return ExpressionNode(node.node_type, node.value, replace_subtree(node.left, remaining, new_subtree), clone_expression(node.right) if node.right is not None else None)
+    if step == 'right' and node.right is not None:
+        return ExpressionNode(node.node_type, node.value, clone_expression(node.left) if node.left is not None else None, replace_subtree(node.right, remaining, new_subtree))
+    return clone_expression(node)
+
+
+
+def mutate_constant_value(value: float, rng: random.Random) -> float:
+    """Perturb an evolved constant while keeping the mutation scale reasonable."""
+    scale = max(0.05, abs(value) * 0.15)
+    return round(value + rng.gauss(0.0, max(CONSTANT_MUTATION_STD, scale)), 4)
+
+
+
+def mutate_expression(node: ExpressionNode, rng: random.Random, max_depth: int) -> ExpressionNode:
+    """Apply subtree mutation, operator mutation, or constant mutation."""
+    base_tree = clone_expression(node)
+    target_path = rng.choice(all_subtree_paths(base_tree))
+    target = get_subtree(base_tree, target_path)
+
+    if target.node_type == 'constant' and rng.random() < 0.55:
+        replacement = ExpressionNode('constant', mutate_constant_value(float(target.value), rng))
+    elif target.node_type == 'variable' and rng.random() < 0.25:
+        replacement = ExpressionNode('variable', 'temperature' if target.value == 'glucose' else 'glucose')
+    elif target.node_type == 'unary' and rng.random() < 0.50:
+        choices = [operator for operator in UNARY_OPERATORS if operator != target.value]
+        replacement = ExpressionNode('unary', rng.choice(choices), left=clone_expression(target.left) if target.left is not None else create_random_terminal(rng))
+    elif target.node_type == 'binary' and rng.random() < 0.50:
+        choices = [operator for operator in BINARY_OPERATORS if operator != target.value]
+        replacement = ExpressionNode(
+            'binary',
+            rng.choice(choices),
+            left=clone_expression(target.left) if target.left is not None else create_random_terminal(rng),
+            right=clone_expression(target.right) if target.right is not None else create_random_terminal(rng),
+        )
+    else:
+        replacement = create_random_expression(rng, max_depth=max(1, min(3, max_depth - len(target_path))), force_function=False)
+
+    mutated = replace_subtree(base_tree, target_path, replacement)
+    if expression_depth(mutated) > max_depth:
+        return clone_expression(node)
+    return mutated
+
+
+
+def subtree_crossover(
+    parent1: ExpressionNode,
+    parent2: ExpressionNode,
+    rng: random.Random,
+    max_depth: int,
+) -> tuple[ExpressionNode, ExpressionNode]:
+    """Swap random subtrees between two parent expressions."""
+    left_parent = clone_expression(parent1)
+    right_parent = clone_expression(parent2)
+
+    left_path = rng.choice(all_subtree_paths(left_parent))
+    right_path = rng.choice(all_subtree_paths(right_parent))
+    left_subtree = clone_expression(get_subtree(left_parent, left_path))
+    right_subtree = clone_expression(get_subtree(right_parent, right_path))
+
+    left_child = replace_subtree(left_parent, left_path, right_subtree)
+    right_child = replace_subtree(right_parent, right_path, left_subtree)
+
+    if expression_depth(left_child) > max_depth:
+        left_child = clone_expression(parent1)
+    if expression_depth(right_child) > max_depth:
+        right_child = clone_expression(parent2)
+    return left_child, right_child
+
+
+
+def calculate_fit_metrics(targets: list[float], predictions: list[float]) -> tuple[float, float, float, float]:
+    """Return SSE, MSE, R², and RMSE for one set of predictions."""
     residuals = [target - prediction for target, prediction in zip(targets, predictions)]
     ss_res = sum(residual * residual for residual in residuals)
+    mse = ss_res / len(targets)
+    mean_voltage = sum(targets) / len(targets)
     ss_tot = sum((target - mean_voltage) ** 2 for target in targets)
-    r_squared = 1.0 - ss_res / ss_tot
-    rmse = math.sqrt(ss_res / len(targets))
+    r_squared = 1.0 - ss_res / ss_tot if ss_tot else 1.0
+    rmse = math.sqrt(mse)
+    return ss_res, mse, r_squared, rmse
+
+
+
+def variables_used(expression: ExpressionNode) -> set[str]:
+    """Return which independent variables are present in an expression tree."""
+    used: set[str] = set()
+    if expression.node_type == 'variable':
+        if expression.value in {'glucose', 'g'}:
+            used.add('glucose')
+        if expression.value in {'temperature', 't'}:
+            used.add('temperature')
+    if expression.left is not None:
+        used.update(variables_used(expression.left))
+    if expression.right is not None:
+        used.update(variables_used(expression.right))
+    return used
+
+
+
+def evaluate_symbolic_candidate(expression: ExpressionNode, dataset: list[Observation]) -> tuple[float, float, float, float, float, float]:
+    """Score one expression tree on the whole dataset."""
+    raw_outputs: list[float] = []
+    targets = [item.voltage for item in dataset]
+
+    for item in dataset:
+        raw_value = evaluate_expression(expression, item.glucose_concentration, item.temperature)
+        if not math.isfinite(raw_value):
+            return SYMBOLIC_INVALID_FITNESS, SYMBOLIC_INVALID_FITNESS, -1.0, SYMBOLIC_INVALID_FITNESS, 0.0, 0.0
+        raw_outputs.append(raw_value)
+
+    mean_output = sum(raw_outputs) / len(raw_outputs)
+    mean_target = sum(targets) / len(targets)
+    variance_output = sum((value - mean_output) ** 2 for value in raw_outputs)
+    if variance_output < 1e-12:
+        output_scale = 0.0
+        output_bias = mean_target
+    else:
+        covariance = sum((value - mean_output) * (target - mean_target) for value, target in zip(raw_outputs, targets))
+        output_scale = covariance / variance_output
+        output_bias = mean_target - output_scale * mean_output
+
+    predictions = [clamp_prediction(output_scale * value + output_bias) for value in raw_outputs]
+    if any(not math.isfinite(prediction) for prediction in predictions):
+        return SYMBOLIC_INVALID_FITNESS, SYMBOLIC_INVALID_FITNESS, -1.0, SYMBOLIC_INVALID_FITNESS, 0.0, 0.0
+
+    _, mse, r_squared, rmse = calculate_fit_metrics(targets, predictions)
+    complexity = expression_complexity(expression)
+    used_variables = variables_used(expression)
+    missing_variable_count = 2 - len(used_variables)
+    fitness = mse + SYMBOLIC_COMPLEXITY_PENALTY * complexity + SYMBOLIC_VARIABLE_PENALTY * missing_variable_count
+    return fitness, mse, r_squared, rmse, output_scale, output_bias
+
+
+
+def tournament_select(
+    population: list[ExpressionNode],
+    fitness_lookup: dict[int, float],
+    rng: random.Random,
+) -> ExpressionNode:
+    """Tournament selection for symbolic-regression individuals."""
+    competitors = rng.sample(population, SYMBOLIC_TOURNAMENT_SIZE)
+    winner = min(competitors, key=lambda candidate: fitness_lookup[id(candidate)])
+    return clone_expression(winner)
+
+
+
+def initialise_symbolic_population(rng: random.Random) -> list[ExpressionNode]:
+    """Create a diverse starting population using ramped tree depths."""
+    population: list[ExpressionNode] = []
+    for index in range(SYMBOLIC_POPULATION_SIZE):
+        depth = rng.randint(1, SYMBOLIC_INITIAL_MAX_DEPTH)
+        force_function = index % 2 == 0
+        population.append(create_random_expression(rng, max_depth=depth, force_function=force_function))
+    return population
+
+
+
+def fit_symbolic_model(dataset: list[Observation]) -> SurrogateModel:
+    """Fit a symbolic-regression surrogate using genetic programming.
+
+    Each population member is an explicit expression tree. Selection, subtree
+    crossover, subtree mutation, and elitism are used to evolve equations that
+    predict voltage while keeping complexity under control.
+    """
+    rng = random.Random(RANDOM_SEED)
+    population = initialise_symbolic_population(rng)
+
+    best_tree = clone_expression(population[0])
+    best_fitness = SYMBOLIC_INVALID_FITNESS
+    best_r_squared = -1.0
+    best_rmse = SYMBOLIC_INVALID_FITNESS
+    best_complexity = expression_complexity(best_tree)
+    best_output_scale = 1.0
+    best_output_bias = 0.0
+    best_history: list[float] = []
+
+    for generation in range(SYMBOLIC_GENERATIONS):
+        scored_population: list[tuple[ExpressionNode, float, float, float, float, float, float]] = []
+        fitness_lookup: dict[int, float] = {}
+
+        for candidate in population:
+            fitness, mse, r_squared, rmse, output_scale, output_bias = evaluate_symbolic_candidate(candidate, dataset)
+            scored_population.append((candidate, fitness, mse, r_squared, rmse, output_scale, output_bias))
+            fitness_lookup[id(candidate)] = fitness
+
+        scored_population.sort(key=lambda entry: entry[1])
+        generation_best, generation_fitness, _, generation_r_squared, generation_rmse, generation_scale, generation_bias = scored_population[0]
+        best_history.append(generation_fitness)
+
+        if generation_fitness < best_fitness:
+            best_tree = clone_expression(generation_best)
+            best_fitness = generation_fitness
+            best_r_squared = generation_r_squared
+            best_rmse = generation_rmse
+            best_complexity = expression_complexity(generation_best)
+            best_output_scale = generation_scale
+            best_output_bias = generation_bias
+
+        print(
+            f'Symbolic generation {generation + 1:2d}: '
+            f'best fitness = {generation_fitness:.6f}, '
+            f'R^2 = {generation_r_squared:.4f}, '
+            f'RMSE = {generation_rmse:.4f}, '
+            f'complexity = {expression_complexity(generation_best)}'
+        )
+
+        elites = [clone_expression(entry[0]) for entry in scored_population[:SYMBOLIC_ELITE_COUNT]]
+        next_population = elites[:]
+
+        while len(next_population) < SYMBOLIC_POPULATION_SIZE:
+            parent1 = tournament_select(population, fitness_lookup, rng)
+            parent2 = tournament_select(population, fitness_lookup, rng)
+
+            if rng.random() < SYMBOLIC_CROSSOVER_RATE:
+                child1, child2 = subtree_crossover(parent1, parent2, rng, SYMBOLIC_MAX_DEPTH)
+            else:
+                child1, child2 = clone_expression(parent1), clone_expression(parent2)
+
+            if rng.random() < SYMBOLIC_MUTATION_RATE:
+                child1 = mutate_expression(child1, rng, SYMBOLIC_MAX_DEPTH)
+            if rng.random() < SYMBOLIC_MUTATION_RATE:
+                child2 = mutate_expression(child2, rng, SYMBOLIC_MAX_DEPTH)
+
+            next_population.append(child1)
+            if len(next_population) < SYMBOLIC_POPULATION_SIZE:
+                next_population.append(child2)
+
+        population = next_population
 
     return SurrogateModel(
-        coefficients=coefficients,
-        feature_names=[
-            "Intercept",
-            "g (scaled glucose)",
-            "t (scaled temp)",
-            "g^2",
-            "t^2",
-            "g*t",
-            "g^3",
-            "t^3",
-            "g^2*t",
-            "g*t^2",
-        ],
-        r_squared=r_squared,
-        rmse=rmse,
+        expression_tree=best_tree,
+        best_expression=expression_to_string(best_tree),
+        output_scale=best_output_scale,
+        output_bias=best_output_bias,
+        best_fitness=best_fitness,
+        r_squared=best_r_squared,
+        rmse=best_rmse,
+        complexity=best_complexity,
+        history=tuple(best_history),
     )
+
+
+
+def predict_symbolic(glucose: float, temperature: float, model: SurrogateModel) -> float:
+    """Predict voltage from glucose and temperature using the evolved expression tree."""
+    prediction = evaluate_expression(model.expression_tree, glucose, temperature)
+    prediction = clamp_prediction(model.output_scale * prediction + model.output_bias)
+    if not math.isfinite(prediction):
+        return 0.0
+    return prediction
 
 
 
 def predict_voltage(glucose: float, temperature: float, model: SurrogateModel) -> float:
-    """Predict voltage from glucose and temperature using the surrogate model."""
-    features = build_feature_row(glucose, temperature)
-    return sum(value * coefficient for value, coefficient in zip(features, model.coefficients))
+    """Compatibility wrapper so the existing optimisation pipeline stays unchanged."""
+    return predict_symbolic(glucose, temperature, model)
 
 
 
 def print_model_summary(model: SurrogateModel, dataset: list[Observation]) -> None:
-    """Print a concise summary of the fitted surrogate model."""
-    print("Fitted surrogate model")
-    print("=" * 78)
-    print("Using centred variables: g = (G - 0.10) / 0.08 and t = (T - 30.0) / 8.0")
-    print(
-        "V = b0 + b1*g + b2*t + b3*g^2 + b4*t^2 + b5*g*t + "
-        "b6*g^3 + b7*t^3 + b8*g^2*t + b9*g*t^2"
-    )
+    """Print a concise summary of the evolved symbolic-regression model."""
+    print('Fitted symbolic regression surrogate')
+    print('=' * 78)
+    print('Input aliases         : g = (glucose - 0.10) / 0.08, t = (temperature - 30.0) / 8.0')
+    print(f'Discovered equation  : V ≈ ({model.output_scale:.4f} * ({model.best_expression})) + {model.output_bias:.4f}')
+    print(f'Dataset rows         : {len(dataset)}')
+    print(f'Best fitness         : {model.best_fitness:.6f}')
+    print(f'Model R^2            : {model.r_squared:.4f}')
+    print(f'Model RMSE           : {model.rmse:.4f} V')
+    print(f'Expression complexity: {model.complexity}')
     print()
-    for name, coefficient in zip(model.feature_names, model.coefficients):
-        print(f"{name:<24} = {coefficient: .6f}")
-    print()
-    print(f"Dataset rows : {len(dataset)}")
-    print(f"Model R^2    : {model.r_squared:.4f}")
-    print(f"Model RMSE   : {model.rmse:.4f} V")
-    print("=" * 78)
+    print('Comparison note      : the previous polynomial surrogate fixed the')
+    print('                       equation structure first and only fit the')
+    print('                       coefficients. This version evolves the equation')
+    print('                       tree itself, so it searches for structure and')
+    print('                       constants together.')
+    print('=' * 78)
+
+
+
+def plot_predicted_vs_actual(dataset: list[Observation], model: SurrogateModel) -> None:
+    """Optional scatter plot for actual vs predicted voltages."""
+    try:
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError:
+        print('Predicted-vs-actual scatter plot was skipped because matplotlib is not installed.')
+        return
+
+    actual = [item.voltage for item in dataset]
+    predicted = [predict_symbolic(item.glucose_concentration, item.temperature, model) for item in dataset]
+
+    figure, axis = plt.subplots(figsize=(6.5, 6.0))
+    axis.scatter(actual, predicted, alpha=0.75, color='#1f77b4', edgecolors='black', linewidths=0.4)
+    low = min(actual + predicted)
+    high = max(actual + predicted)
+    axis.plot([low, high], [low, high], '--', color='black', linewidth=1.2)
+    axis.set_xlabel('Actual voltage (V)')
+    axis.set_ylabel('Predicted voltage (V)')
+    axis.set_title('Symbolic regression: predicted vs actual')
+    figure.tight_layout()
+    plt.show()
+
+
+
+def plot_symbolic_history(model: SurrogateModel) -> None:
+    """Optional best-fitness-per-generation plot for the symbolic GP run."""
+    try:
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError:
+        print('Symbolic fitness plot was skipped because matplotlib is not installed.')
+        return
+
+    generations = list(range(1, len(model.history) + 1))
+    figure, axis = plt.subplots(figsize=(7.0, 4.2))
+    axis.plot(generations, list(model.history), color='#d62728', linewidth=2)
+    axis.set_xlabel('Symbolic regression generation')
+    axis.set_ylabel('Best fitness')
+    axis.set_title('GA-based symbolic regression training history')
+    figure.tight_layout()
+    plt.show()
 
 
 # -----------------------------------------------------------------------------
@@ -408,7 +996,7 @@ def plot_surface_3d(
 ) -> None:
     """Plot the fitted surrogate model as a 3D surface.
 
-    The surface uses the already-fitted regression model. The final GA
+    The surface uses the already-fitted symbolic model. The final GA
     population is overlaid as scatter points so the search result can be
     compared directly with the surrogate landscape.
     """
@@ -481,7 +1069,7 @@ def plot_surface_3d(
     axis.set_xlabel("Glucose concentration (mol dm^-3)", labelpad=12)
     axis.set_ylabel("Temperature (°C)", labelpad=12)
     axis.set_zlabel("Predicted voltage (V)", labelpad=10)
-    axis.set_title("3D Surface Plot of the Fitted Regression Model", pad=18)
+    axis.set_title("3D Surface Plot of the Fitted Symbolic Model", pad=18)
     axis.view_init(elev=28, azim=-130)
     axis.legend(loc="upper left")
 
@@ -964,8 +1552,10 @@ def main() -> None:
     random.seed(RANDOM_SEED)
 
     dataset = create_sample_dataset()
-    model = fit_surrogate_model(dataset)
+    model = fit_symbolic_model(dataset)
     print_model_summary(model, dataset)
+    plot_predicted_vs_actual(dataset, model)
+    plot_symbolic_history(model)
 
     history, best_solution, best_voltage = run_genetic_algorithm(model)
 
