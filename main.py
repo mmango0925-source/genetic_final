@@ -69,6 +69,7 @@ class ExpressionNode:
 
 
 
+
 @dataclass(frozen=True)
 class SurrogateModel:
     """Stores the best symbolic-regression expression and its fit statistics."""
@@ -120,6 +121,40 @@ UNARY_OPERATORS = ('sin', 'cos', 'exp', 'log')
 
 
 
+COLLECTED_ROWS = [
+    (20.0, 0.20, 0.83),
+    (20.0, 0.15, 0.74),
+    (20.0, 0.10, 0.73),
+    (20.0, 0.05, 0.74),
+    (20.0, 0.00, 0.68),
+    (25.0, 0.20, 0.81),
+    (25.0, 0.15, 0.87),
+    (25.0, 0.10, 0.80),
+    (25.0, 0.05, 0.77),
+    (25.0, 0.00, 0.62),
+    (30.0, 0.20, 0.78),
+    (30.0, 0.15, 0.74),
+    (30.0, 0.10, 0.77),
+    (30.0, 0.05, 0.76),
+    (30.0, 0.00, 0.74),
+    (30.0, 0.20, 0.77),
+    (30.0, 0.15, 0.75),
+    (30.0, 0.10, 0.75),
+    (30.0, 0.05, 0.76),
+    (30.0, 0.00, 0.73),
+    (35.0, 0.20, 0.85),
+    (35.0, 0.15, 0.82),
+    (35.0, 0.10, 0.75),
+    (35.0, 0.05, 0.71),
+    (35.0, 0.00, 0.70),
+    (40.0, 0.20, 0.73),
+    (40.0, 0.15, 0.70),
+    (40.0, 0.10, 0.66),
+    (40.0, 0.05, 0.66),
+    (40.0, 0.00, 0.62),
+]
+
+
 def true_biological_response(glucose: float, temperature: float) -> float:
     """Legacy synthetic response kept for reference from the earlier version."""
     main_peak = 0.95 * math.exp(-((glucose - 0.11) / 0.045) ** 2 - ((temperature - 31.5) / 4.8) ** 2)
@@ -132,8 +167,28 @@ def true_biological_response(glucose: float, temperature: float) -> float:
 
 
 
+def build_measured_dataset() -> list[Observation]:
+    """Convert the collected measurement table into Observation rows."""
+    return [
+        Observation(
+            glucose_concentration=glucose,
+            temperature=temperature,
+            voltage=voltage,
+        )
+        for temperature, glucose, voltage in COLLECTED_ROWS
+    ]
+
+
+
 def create_sample_dataset() -> list[Observation]:
     """Create a dataset from the collected readings plus smooth interpolated points.
+
+    The collected table is kept intact, and additional interpolated grid observations are
+    generated from neighbouring measured values. This gives the symbolic
+    regression a much denser and smoother 2D surface to learn from so the
+    fitted curve/response surface looks more natural.
+    """
+    measured_dataset = build_measured_dataset()
 
     The collected table is kept intact, and additional interpolated grid observations are
     generated from neighbouring measured values. This gives the symbolic
@@ -191,6 +246,57 @@ def create_sample_dataset() -> list[Observation]:
     for observation in measured_dataset:
         key = (observation.temperature, observation.glucose_concentration)
         grouped_values.setdefault(key, []).append(observation.voltage)
+
+    for key, values in grouped_values.items():
+        mean_lookup[key] = sum(values) / len(values)
+
+    temperature_values = sorted({observation.temperature for observation in measured_dataset})
+    glucose_values = sorted({observation.glucose_concentration for observation in measured_dataset})
+    augmented_lookup: dict[tuple[float, float], float] = {}
+    interpolation_fractions = (0.25, 0.50, 0.75)
+
+    for temperature in temperature_values:
+        for glucose_left, glucose_right in zip(glucose_values, glucose_values[1:]):
+            left_voltage = mean_lookup[(temperature, glucose_left)]
+            right_voltage = mean_lookup[(temperature, glucose_right)]
+            for fraction in interpolation_fractions:
+                interpolated_glucose = glucose_left + (glucose_right - glucose_left) * fraction
+                interpolated_voltage = left_voltage + (right_voltage - left_voltage) * fraction
+                augmented_lookup[(round(temperature, 4), round(interpolated_glucose, 4))] = interpolated_voltage
+
+    for glucose in glucose_values:
+        for temperature_low, temperature_high in zip(temperature_values, temperature_values[1:]):
+            low_voltage = mean_lookup[(temperature_low, glucose)]
+            high_voltage = mean_lookup[(temperature_high, glucose)]
+            for fraction in interpolation_fractions:
+                interpolated_temperature = temperature_low + (temperature_high - temperature_low) * fraction
+                interpolated_voltage = low_voltage + (high_voltage - low_voltage) * fraction
+                augmented_lookup[(round(interpolated_temperature, 4), round(glucose, 4))] = interpolated_voltage
+
+    for temperature_low, temperature_high in zip(temperature_values, temperature_values[1:]):
+        for glucose_left, glucose_right in zip(glucose_values, glucose_values[1:]):
+            top_left = mean_lookup[(temperature_low, glucose_left)]
+            top_right = mean_lookup[(temperature_low, glucose_right)]
+            bottom_left = mean_lookup[(temperature_high, glucose_left)]
+            bottom_right = mean_lookup[(temperature_high, glucose_right)]
+            centre_temperature = (temperature_low + temperature_high) / 2.0
+            centre_glucose = (glucose_left + glucose_right) / 2.0
+            cell_average = (top_left + top_right + bottom_left + bottom_right) / 4.0
+            augmented_lookup[(round(centre_temperature, 4), round(centre_glucose, 4))] = cell_average
+
+    augmented_dataset = list(measured_dataset)
+    original_keys = set(grouped_values)
+    for (temperature, glucose), voltage in sorted(augmented_lookup.items()):
+        if (temperature, glucose) in original_keys:
+            continue
+        augmented_dataset.append(
+            Observation(
+                glucose_concentration=glucose,
+                temperature=temperature,
+                voltage=voltage,
+            )
+        )
+
 
     for key, values in grouped_values.items():
         mean_lookup[key] = sum(values) / len(values)
