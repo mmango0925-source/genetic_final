@@ -10,6 +10,7 @@ from typing import Callable, NamedTuple
 # Microbial fuel cell optimisation project
 # -----------------------------------------------------------------------------
 # Workflow:
+#   1. Load the collected experimental dataset.
 #   1. Create an experimental-style dataset.
 #   2. Fit a symbolic regression model to the dataset.
 #   3. Treat that discovered equation as a surrogate model.
@@ -102,6 +103,7 @@ SYMBOLIC_CROSSOVER_RATE = 0.80
 SYMBOLIC_ELITE_COUNT = 3
 SYMBOLIC_INITIAL_MAX_DEPTH = 5
 SYMBOLIC_MAX_DEPTH = 7
+SYMBOLIC_COMPLEXITY_PENALTY = 0.0001
 SYMBOLIC_COMPLEXITY_PENALTY = 0.0009
 SYMBOLIC_OUTPUT_CLAMP = 2.5
 SYMBOLIC_INVALID_FITNESS = 1_000_000.0
@@ -113,7 +115,7 @@ UNARY_OPERATORS = ('sin', 'cos', 'exp', 'log')
 
 
 def true_biological_response(glucose: float, temperature: float) -> float:
-    """Create a realistic hidden response used only to generate sample data."""
+    """Legacy synthetic response kept for reference from the earlier version."""
     main_peak = 0.95 * math.exp(-((glucose - 0.11) / 0.045) ** 2 - ((temperature - 31.5) / 4.8) ** 2)
     secondary_peak = 0.16 * math.exp(-((glucose - 0.17) / 0.022) ** 2 - ((temperature - 27.0) / 3.8) ** 2)
     stress_penalty = 0.16 * ((glucose - 0.11) / 0.09) ** 4 + 0.14 * ((temperature - 31.0) / 7.5) ** 4
@@ -125,22 +127,55 @@ def true_biological_response(glucose: float, temperature: float) -> float:
 
 
 def create_sample_dataset() -> list[Observation]:
-    """Create a larger dataset with repeated trials and experimental noise."""
-    glucose_levels = [0.02, 0.04, 0.06, 0.08, 0.10, 0.12, 0.14, 0.16, 0.18]
-    temperature_levels = [22.0, 25.0, 28.0, 31.0, 34.0, 37.0, 40.0]
-    trial_count = 3
-    rng = random.Random(RANDOM_SEED)
+    """Create a dataset directly from the collected experimental readings."""
+    collected_rows = [
+        (20.0, 0.20, 0.83),
+        (20.0, 0.15, 0.74),
+        (20.0, 0.10, 0.73),
+        (20.0, 0.05, 0.74),
+        (20.0, 0.00, 0.68),
+        (25.0, 0.20, 0.81),
+        (25.0, 0.15, 0.87),
+        (25.0, 0.10, 0.80),
+        (25.0, 0.05, 0.77),
+        (25.0, 0.00, 0.62),
+        (30.0, 0.20, 0.78),
+        (30.0, 0.15, 0.74),
+        (30.0, 0.10, 0.77),
+        (30.0, 0.05, 0.76),
+        (30.0, 0.00, 0.74),
+        (30.0, 0.20, 0.77),
+        (30.0, 0.15, 0.75),
+        (30.0, 0.10, 0.75),
+        (30.0, 0.05, 0.76),
+        (30.0, 0.00, 0.73),
+        (35.0, 0.20, 0.85),
+        (35.0, 0.15, 0.82),
+        (35.0, 0.10, 0.75),
+        (35.0, 0.05, 0.71),
+        (35.0, 0.00, 0.70),
+        (40.0, 0.20, 0.73),
+        (40.0, 0.15, 0.70),
+        (40.0, 0.10, 0.66),
+        (40.0, 0.05, 0.66),
+        (40.0, 0.00, 0.62),
+    ]
+    return [
+        Observation(
+            glucose_concentration=glucose,
+            temperature=temperature,
+            voltage=voltage,
+        )
+        for temperature, glucose, voltage in collected_rows
+    ]
 
-    dataset: list[Observation] = []
-    for glucose in glucose_levels:
-        for temperature in temperature_levels:
-            baseline_voltage = true_biological_response(glucose, temperature)
-            for _ in range(trial_count):
-                experimental_noise = rng.uniform(-0.028, 0.028)
-                measured_voltage = max(0.05, baseline_voltage + experimental_noise)
-                dataset.append(Observation(glucose, temperature, measured_voltage))
 
-    return dataset
+
+def protected_divide(numerator: float, denominator: float, epsilon: float = 1e-6) -> float:
+    """Protected division to keep evolved equations numerically safe."""
+    if abs(denominator) < epsilon:
+        denominator = epsilon if denominator >= 0.0 else -epsilon
+    return numerator / denominator
 
 
 
@@ -169,6 +204,17 @@ def scale_inputs(glucose: float, temperature: float) -> tuple[float, float]:
     g = (glucose - GLUCOSE_CENTRE) / GLUCOSE_SCALE
     t = (temperature - TEMPERATURE_CENTRE) / TEMPERATURE_SCALE
     return g, t
+
+
+
+def clip_numeric(value: float, limit: float = 1_000_000.0) -> float:
+    """Clamp extreme intermediate values so invalid trees do not explode."""
+    if not math.isfinite(value):
+        return float('nan')
+    return max(-limit, min(limit, value))
+
+
+
 
 
 
@@ -235,6 +281,14 @@ def make_variable_node(rng: random.Random) -> ExpressionNode:
     variable_choices = ('glucose', 'temperature', 'g', 't', 'g', 't')
     return ExpressionNode('variable', rng.choice(variable_choices))
 
+def make_constant_node(rng: random.Random) -> ExpressionNode:
+    return ExpressionNode('constant', random_constant(rng))
+
+
+
+def make_variable_node(rng: random.Random) -> ExpressionNode:
+    variable_choices = ('glucose', 'temperature', 'g', 't', 'g', 't')
+    return ExpressionNode('variable', rng.choice(variable_choices))
 
 
 def clone_expression(node: ExpressionNode) -> ExpressionNode:
@@ -245,6 +299,23 @@ def clone_expression(node: ExpressionNode) -> ExpressionNode:
         left=clone_expression(node.left) if node.left is not None else None,
         right=clone_expression(node.right) if node.right is not None else None,
     )
+
+def clone_expression(node: ExpressionNode) -> ExpressionNode:
+    """Deep-copy an expression tree."""
+    return ExpressionNode(
+        node_type=node.node_type,
+        value=node.value,
+        left=clone_expression(node.left) if node.left is not None else None,
+        right=clone_expression(node.right) if node.right is not None else None,
+    )
+
+
+def create_random_terminal(rng: random.Random) -> ExpressionNode:
+    """Create a variable or constant terminal."""
+    if rng.random() < 0.55:
+        return make_variable_node(rng)
+    return make_constant_node(rng)
+
 
 
 
