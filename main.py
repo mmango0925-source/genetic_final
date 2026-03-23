@@ -10,6 +10,7 @@ from typing import Callable, NamedTuple
 # Microbial fuel cell optimisation project
 # -----------------------------------------------------------------------------
 # Workflow:
+#   1. Create a dense experimental-style dataset.
 #   1. Load the collected experimental dataset.
 #   1. Create an experimental-style dataset.
 #   2. Fit a symbolic regression model to the dataset.
@@ -70,6 +71,8 @@ class ExpressionNode:
 
 
 
+
+
 @dataclass(frozen=True)
 class SurrogateModel:
     """Stores the best symbolic-regression expression and its fit statistics."""
@@ -110,6 +113,7 @@ SYMBOLIC_INITIAL_MAX_DEPTH = 5
 SYMBOLIC_MAX_DEPTH = 7
 SYMBOLIC_COMPLEXITY_PENALTY = 0.00008
 SYMBOLIC_VARIABLE_PENALTY = 0.0015
+SYMBOLIC_OUTPUT_CLAMP = 1.40
 SYMBOLIC_COMPLEXITY_PENALTY = 0.0001
 SYMBOLIC_COMPLEXITY_PENALTY = 0.0009
 SYMBOLIC_OUTPUT_CLAMP = 2.5
@@ -120,6 +124,9 @@ BINARY_OPERATORS = ('+', '-', '*', '/')
 UNARY_OPERATORS = ('sin', 'cos', 'exp', 'log')
 
 
+
+def true_biological_response(glucose: float, temperature: float) -> float:
+    """Create a deliberately complex hidden biological response surface.
 
 COLLECTED_ROWS = [
     (20.0, 0.20, 0.83),
@@ -162,7 +169,22 @@ def true_biological_response(glucose: float, temperature: float) -> float:
     stress_penalty = 0.16 * ((glucose - 0.11) / 0.09) ** 4 + 0.14 * ((temperature - 31.0) / 7.5) ** 4
     metabolic_wobble = 0.03 * math.sin(26.0 * glucose + 0.35 * temperature)
 
-    voltage = 0.24 + main_peak + secondary_peak + metabolic_wobble - stress_penalty
+    The response is designed to be clearly non-linear and slightly irregular so
+    a symbolic surrogate and GA-based optimisation are justified in the project.
+    It contains a main optimum, a stronger secondary peak, a sharp quartic
+    stress penalty, and a stronger metabolic wobble term.
+    """
+    main_peak = 0.98 * math.exp(-((glucose - 0.11) / 0.030) ** 2 - ((temperature - 31.5) / 3.6) ** 2)
+    secondary_peak = 0.34 * math.exp(-((glucose - 0.17) / 0.018) ** 2 - ((temperature - 26.5) / 2.5) ** 2)
+    tertiary_shoulder = 0.16 * math.exp(-((glucose - 0.055) / 0.020) ** 2 - ((temperature - 36.0) / 2.8) ** 2)
+
+    stress_penalty = 0.24 * ((glucose - 0.11) / 0.082) ** 4 + 0.20 * ((temperature - 31.0) / 6.0) ** 4
+    interaction_penalty = 0.10 * (((glucose - 0.14) * (temperature - 30.0)) / 0.22) ** 2
+    metabolic_wobble = 0.065 * math.sin(34.0 * glucose + 0.58 * temperature)
+    metabolic_wobble += 0.028 * math.sin(18.0 * glucose - 0.22 * temperature)
+
+    voltage = 0.23 + main_peak + secondary_peak + tertiary_shoulder + metabolic_wobble
+    voltage -= stress_penalty + interaction_penalty
     return max(0.05, voltage)
 
 
@@ -181,6 +203,31 @@ def build_measured_dataset() -> list[Observation]:
 
 
 def create_sample_dataset() -> list[Observation]:
+    """Create a denser synthetic dataset with repeated noisy trials.
+
+    The sampling grid is intentionally denser than before so the learned
+    surrogate has to approximate a richer non-linear response surface rather
+    than a simple smooth hill.
+    """
+    glucose_levels = [0.00, 0.02, 0.04, 0.06, 0.08, 0.10, 0.12, 0.14, 0.16, 0.18, 0.20]
+    temperature_levels = [20.0, 22.5, 25.0, 27.5, 30.0, 32.5, 35.0, 37.5, 40.0]
+    trial_count = 4
+    rng = random.Random(RANDOM_SEED)
+
+    dataset: list[Observation] = []
+    for temperature in temperature_levels:
+        for glucose in glucose_levels:
+            baseline_voltage = true_biological_response(glucose, temperature)
+            for _ in range(trial_count):
+                experimental_noise = rng.uniform(-0.035, 0.035)
+                measured_voltage = max(0.05, baseline_voltage + experimental_noise)
+                dataset.append(
+                    Observation(
+                        glucose_concentration=glucose,
+                        temperature=temperature,
+                        voltage=measured_voltage,
+                    )
+                )
     """Create a dataset from the collected readings plus smooth interpolated points.
 
     The collected table is kept intact, and additional interpolated grid observations are
@@ -246,6 +293,13 @@ def create_sample_dataset() -> list[Observation]:
     for observation in measured_dataset:
         key = (observation.temperature, observation.glucose_concentration)
         grouped_values.setdefault(key, []).append(observation.voltage)
+
+def protected_divide(numerator: float, denominator: float, epsilon: float = 1e-6) -> float:
+    """Protected division to keep evolved equations numerically safe."""
+    if abs(denominator) < epsilon:
+        denominator = epsilon if denominator >= 0.0 else -epsilon
+    return numerator / denominator
+
 
     for key, values in grouped_values.items():
         mean_lookup[key] = sum(values) / len(values)
@@ -464,6 +518,9 @@ def scale_inputs(glucose: float, temperature: float) -> tuple[float, float]:
 
 
 
+
+
+
 def clip_numeric(value: float, limit: float = 1_000_000.0) -> float:
     """Clamp extreme intermediate values so invalid trees do not explode."""
     if not math.isfinite(value):
@@ -560,9 +617,18 @@ def make_variable_node(rng: random.Random) -> ExpressionNode:
     variable_choices = ('glucose', 'temperature', 'g', 't', 'g', 't')
     return ExpressionNode('variable', rng.choice(variable_choices))
 
+
 def make_constant_node(rng: random.Random) -> ExpressionNode:
     return ExpressionNode('constant', random_constant(rng))
 
+
+
+def make_variable_node(rng: random.Random) -> ExpressionNode:
+    variable_choices = ('glucose', 'temperature', 'g', 't', 'g', 't')
+    return ExpressionNode('variable', rng.choice(variable_choices))
+
+def make_constant_node(rng: random.Random) -> ExpressionNode:
+    return ExpressionNode('constant', random_constant(rng))
 
 def clone_expression(node: ExpressionNode) -> ExpressionNode:
     """Deep-copy an expression tree."""
@@ -572,6 +638,23 @@ def clone_expression(node: ExpressionNode) -> ExpressionNode:
         left=clone_expression(node.left) if node.left is not None else None,
         right=clone_expression(node.right) if node.right is not None else None,
     )
+
+def clone_expression(node: ExpressionNode) -> ExpressionNode:
+    """Deep-copy an expression tree."""
+    return ExpressionNode(
+        node_type=node.node_type,
+        value=node.value,
+        left=clone_expression(node.left) if node.left is not None else None,
+        right=clone_expression(node.right) if node.right is not None else None,
+    )
+
+
+def create_random_terminal(rng: random.Random) -> ExpressionNode:
+    """Create a variable or constant terminal."""
+    if rng.random() < 0.55:
+        return make_variable_node(rng)
+    return make_constant_node(rng)
+
 
 
 
