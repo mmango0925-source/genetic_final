@@ -40,6 +40,7 @@ TEMPERATURE_MUTATION_STEP = 1.50
 RANDOM_SEED = 7
 ANIMATION_DELAY_MS = 300
 SURFACE_PLOT_FILE = "surface_plot.png"
+TRAJECTORY_PLOT_FILE = "evolutionary_trajectory_map.png"
 DATASET_EXPORT_FILE = "model_data_points.csv"
 
 GLUCOSE_CENTRE = 0.10
@@ -761,6 +762,129 @@ def plot_symbolic_history(model: SurrogateModel) -> None:
     axis.set_ylabel('Best fitness')
     axis.set_title('GA-based symbolic regression training history')
     figure.tight_layout()
+    plt.show()
+
+
+def plot_evolutionary_trajectory_map(
+    model: SurrogateModel,
+    history: list[GenerationSnapshot],
+    filepath: str = TRAJECTORY_PLOT_FILE,
+) -> None:
+    """Plot the best GA position each generation on a 2D surrogate heatmap."""
+    try:
+        import numpy as np
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError:
+        print(
+            'Evolutionary trajectory map was skipped because numpy and/or '
+            'matplotlib are not installed.'
+        )
+        return
+
+    glucose_values = np.linspace(MIN_GLUCOSE, MAX_GLUCOSE, 120)
+    temperature_values = np.linspace(MIN_TEMPERATURE, MAX_TEMPERATURE, 120)
+    glucose_grid, temperature_grid = np.meshgrid(glucose_values, temperature_values)
+    voltage_grid = np.empty_like(glucose_grid)
+
+    for row_index in range(glucose_grid.shape[0]):
+        for column_index in range(glucose_grid.shape[1]):
+            voltage_grid[row_index, column_index] = predict_voltage(
+                float(glucose_grid[row_index, column_index]),
+                float(temperature_grid[row_index, column_index]),
+                model,
+            )
+
+    trajectory_glucose = [snapshot.best_individual[0] for snapshot in history]
+    trajectory_temperature = [snapshot.best_individual[1] for snapshot in history]
+    trajectory_voltage = [snapshot.best_voltage for snapshot in history]
+
+    figure, axis = plt.subplots(figsize=(9.5, 6.8))
+    contour = axis.contourf(
+        glucose_grid,
+        temperature_grid,
+        voltage_grid,
+        levels=24,
+        cmap='viridis',
+    )
+    axis.contour(
+        glucose_grid,
+        temperature_grid,
+        voltage_grid,
+        levels=12,
+        colors='white',
+        linewidths=0.45,
+        alpha=0.45,
+    )
+
+    axis.plot(
+        trajectory_glucose,
+        trajectory_temperature,
+        color='#ff6b6b',
+        linewidth=2.2,
+        marker='o',
+        markersize=4.5,
+        markerfacecolor='white',
+        markeredgewidth=0.8,
+        label='Best individual by generation',
+    )
+    axis.scatter(
+        trajectory_glucose[0],
+        trajectory_temperature[0],
+        s=90,
+        c='#feca57',
+        edgecolors='black',
+        marker='s',
+        zorder=5,
+        label='Generation 1 best',
+    )
+    axis.scatter(
+        trajectory_glucose[-1],
+        trajectory_temperature[-1],
+        s=140,
+        c='#ff9ff3',
+        edgecolors='black',
+        marker='*',
+        zorder=6,
+        label='Final best',
+    )
+
+    for generation_index in (1, len(history) // 2, len(history)):
+        snapshot = history[generation_index - 1]
+        axis.annotate(
+            f'G{generation_index}',
+            xy=snapshot.best_individual,
+            xytext=(6, 6),
+            textcoords='offset points',
+            fontsize=9,
+            color='white',
+            bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.35, edgecolor='none'),
+        )
+
+    axis.set_xlabel('Glucose concentration (mol dm^-3)')
+    axis.set_ylabel('Temperature (°C)')
+    axis.set_title('Evolutionary Trajectory Map of the GA Search')
+    axis.legend(loc='upper right')
+
+    colourbar = figure.colorbar(contour, ax=axis, pad=0.02)
+    colourbar.set_label('Predicted voltage (V)')
+
+    summary_text = (
+        f'Start voltage: {trajectory_voltage[0]:.3f} V\n'
+        f'End voltage: {trajectory_voltage[-1]:.3f} V\n'
+        f'Generations: {len(history)}'
+    )
+    axis.text(
+        0.02,
+        0.02,
+        summary_text,
+        transform=axis.transAxes,
+        fontsize=9,
+        color='white',
+        bbox=dict(boxstyle='round,pad=0.35', facecolor='black', alpha=0.45, edgecolor='none'),
+    )
+
+    figure.tight_layout()
+    figure.savefig(filepath, dpi=300)
     plt.show()
 
 
@@ -1499,6 +1623,7 @@ def main() -> None:
     model = fit_symbolic_model(dataset)
     print_model_summary(model, dataset)
     print(f"Dataset points file     : {DATASET_EXPORT_FILE}")
+    print(f"Trajectory map file    : {TRAJECTORY_PLOT_FILE}")
     plot_predicted_vs_actual(dataset, model)
     plot_symbolic_history(model)
 
@@ -1512,6 +1637,7 @@ def main() -> None:
     print("=" * 78)
 
     plot_surface_3d(model, history[-1].population, best_solution)
+    plot_evolutionary_trajectory_map(model, history)
 
     try:
         viewer = GeneticAlgorithmViewer(model, history)
